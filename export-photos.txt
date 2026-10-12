@@ -1,0 +1,54 @@
+(async () => {
+  'use strict';
+  if (location.origin !== 'https://cartepro-mobile.gillesarnaudasse65.chatgpt.site') {
+    alert('Ouvrez d’abord l’ancienne application CartePro dans cet onglet.'); return;
+  }
+  const box=document.createElement('div');
+  Object.assign(box.style,{position:'fixed',top:'20px',left:'20px',right:'20px',padding:'20px',background:'#fff',color:'#184d43',border:'2px solid #184d43',borderRadius:'12px',zIndex:'2147483647',font:'16px system-ui',maxHeight:'80vh',overflow:'auto'});
+  const status=document.createElement('p');status.textContent='Préparation de l’export des photos…';box.append(status);document.body.append(box);
+  const urls=[];
+  const close=document.createElement('button');close.textContent='Fermer';close.onclick=()=>{urls.forEach(url=>URL.revokeObjectURL(url));box.remove();};box.append(close);
+  const table=Uint32Array.from({length:256},(_,n)=>{let v=n;for(let i=0;i<8;i++)v=v&1?0xedb88320^(v>>>1):v>>>1;return v>>>0;});
+  const crc32=bytes=>{let crc=0xffffffff;for(const byte of bytes)crc=table[(crc^byte)&255]^(crc>>>8);return(crc^0xffffffff)>>>0;};
+  const encoder=new TextEncoder();
+  function zip(files){
+    const parts=[],central=[];let offset=0,centralSize=0;
+    for(const file of files){
+      const name=encoder.encode(file.name),crc=crc32(file.bytes),header=new Uint8Array(30+name.length),view=new DataView(header.buffer);
+      view.setUint32(0,0x04034b50,true);view.setUint16(4,20,true);view.setUint16(12,33,true);view.setUint32(14,crc,true);view.setUint32(18,file.bytes.length,true);view.setUint32(22,file.bytes.length,true);view.setUint16(26,name.length,true);header.set(name,30);parts.push(header,file.bytes);
+      const record=new Uint8Array(46+name.length),cv=new DataView(record.buffer);cv.setUint32(0,0x02014b50,true);cv.setUint16(4,20,true);cv.setUint16(6,20,true);cv.setUint16(14,33,true);cv.setUint32(16,crc,true);cv.setUint32(20,file.bytes.length,true);cv.setUint32(24,file.bytes.length,true);cv.setUint16(28,name.length,true);cv.setUint32(42,offset,true);record.set(name,46);central.push(record);centralSize+=record.length;offset+=header.length+file.bytes.length;
+    }
+    const end=new Uint8Array(22),view=new DataView(end.buffer);view.setUint32(0,0x06054b50,true);view.setUint16(8,files.length,true);view.setUint16(10,files.length,true);view.setUint32(12,centralSize,true);view.setUint32(16,offset,true);
+    return new Blob([...parts,...central,end],{type:'application/zip'});
+  }
+  let part=1,files=[],size=0,completed=0;const failed=[];
+  function finish(){
+    if(!files.length)return;
+    const metadata={format:'cartepro-photos-v1',files:files.length,failed:[...failed]};
+    const archive=zip([...files,{name:'manifest.json',bytes:encoder.encode(JSON.stringify(metadata))}]);
+    const url=URL.createObjectURL(archive);urls.push(url);const link=document.createElement('a');link.href=url;link.download=`CartePro-photos-${part++}.zip`;link.textContent=`Télécharger ${link.download} (${files.length} photos)`;Object.assign(link.style,{display:'block',margin:'12px 0',color:'#184d43',fontWeight:'bold'});box.insertBefore(link,close);files=[];size=0;
+  }
+  try{
+    const response=await fetch('/api/contacts',{credentials:'same-origin',cache:'no-store'});
+    if(!response.ok)throw new Error('Reconnectez-vous dans l’ancienne application puis recommencez.');
+    const data=await response.json();if(!Array.isArray(data.contacts))throw new Error('Le carnet ne peut pas être lu.');
+    const todo=[];
+    for(const contact of data.contacts){
+      if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(contact.id))throw new Error('Identifiant de contact invalide.');
+      for(const [side,key] of [['front',contact.photoKey],['back',contact.photoBackKey]])if(typeof key==='string'&&key)todo.push({id:contact.id.toLowerCase(),side,key});
+    }
+    for(const photo of todo){
+      try{
+        const result=await fetch('/api/photo?key='+encodeURIComponent(photo.key),{credentials:'same-origin',cache:'no-store'});
+        if(!result.ok)throw new Error('Photo indisponible');
+        const type=(result.headers.get('content-type')||'').split(';')[0].trim(),extension={'image/jpeg':'jpg','image/png':'png','image/webp':'webp'}[type];
+        if(!extension)throw new Error('Format non reconnu');
+        const bytes=new Uint8Array(await result.arrayBuffer());if(!bytes.length||bytes.length>8000000)throw new Error('Taille invalide');
+        if(size+bytes.length>24*1024*1024||files.length>=150)finish();
+        files.push({name:`${photo.id}/${photo.side}.${extension}`,bytes});size+=bytes.length;completed++;
+      }catch{failed.push({contactId:photo.id,side:photo.side});}
+      status.textContent=`Photos récupérées : ${completed}/${todo.length}. Échecs : ${failed.length}.`;
+    }
+    finish();status.textContent=`Export terminé : ${completed}/${todo.length} photos. Cliquez sur chaque lien pour enregistrer les archives. Échecs : ${failed.length}. L’ancienne application n’a pas été modifiée.`;
+  }catch(error){status.textContent=error instanceof Error?error.message:'Export interrompu.';}
+})();
